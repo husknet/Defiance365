@@ -75,6 +75,7 @@ function fuzzyMatchISP(isp) {
 
 async function checkIPReputation(ip) {
   try {
+    console.log("🧠 Checking AbuseIPDB reputation for IP:", ip);
     const res = await axios.get("https://api.abuseipdb.com/api/v2/check", {
       headers: {
         Key: process.env.ABUSEIPDB_API_KEY,
@@ -83,9 +84,10 @@ async function checkIPReputation(ip) {
       params: { ipAddress: ip, maxAgeInDays: 30 },
       timeout: 4000
     });
+    console.log("✅ AbuseIPDB response:", res.data);
     return res.data.data.abuseConfidenceScore >= 50;
   } catch (error) {
-    console.error("❌ AbuseIPDB failed:", error.message);
+    console.error("❌ AbuseIPDB check failed:", error.message);
     return false;
   }
 }
@@ -95,49 +97,67 @@ function verifyJwt(token) {
     const secret = process.env.JWT_SECRET;
     return jwt.verify(token, secret);
   } catch (err) {
+    console.error("❌ JWT verification failed:", err.message);
     return null;
   }
 }
 
 export default async function handler(req, res) {
   try {
+    console.log("➡️ Request received:", req.method, req.url);
+
     res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGINS);
     res.setHeader('Access-Control-Allow-Methods', 'OPTIONS, POST');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-    if (req.method === 'OPTIONS') return res.status(200).end();
-    if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+    if (req.method === 'OPTIONS') {
+      console.log("ℹ️ OPTIONS request");
+      return res.status(200).end();
+    }
 
-    // Validate JWT token
+    if (req.method !== 'POST') {
+      console.warn("⚠️ Invalid method:", req.method);
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    // JWT Authentication
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.warn("❌ Missing Authorization header");
       return res.status(401).json({ error: 'Unauthorized: Missing or invalid Authorization header.' });
     }
 
     const token = authHeader.split(' ')[1];
     const jwtPayload = verifyJwt(token);
-
     if (!jwtPayload) {
+      console.warn("❌ Invalid JWT token");
       return res.status(401).json({ error: 'Unauthorized: Invalid JWT token.' });
     }
 
     const origin = req.headers.origin || '';
     const allowedOrigins = process.env.ALLOWED_ORIGINS.split(',');
-    if (!allowedOrigins.includes(origin)) {
+    if (!allowedOrigins.includes(origin) && process.env.ALLOWED_ORIGINS !== '*') {
+      console.warn("🚫 Forbidden origin:", origin);
       return res.status(403).json({ error: 'Forbidden: Origin not allowed.' });
     }
 
     const { user_agent, ip } = req.body;
     if (!ip || !user_agent) {
+      console.warn("⚠️ Missing IP or user_agent");
       return res.status(400).json({ error: 'Missing required fields.' });
     }
 
+    console.log("🌍 IP:", ip);
+    console.log("🧭 User-Agent:", user_agent);
+
     const isBotUserAgent = [/bot/, /crawl/, /scraper/, /spider/, /httpclient/, /python/]
       .some(p => p.test(user_agent.toLowerCase()));
+
     const isIPAbuser = await checkIPReputation(ip);
 
     let isp = 'unknown', asn = 'unknown', country = 'unknown';
     try {
+      console.log("📡 Fetching geolocation...");
       const geoRes = await axios.get("https://api.ipgeolocation.io/ipgeo", {
         params: {
           apiKey: process.env.IPGEOLOCATION_API_KEY,
@@ -149,10 +169,13 @@ export default async function handler(req, res) {
       isp = geoRes.data?.isp?.toLowerCase() || 'unknown';
       asn = geoRes.data?.asn || 'unknown';
       country = geoRes.data?.country_name || 'unknown';
+
+      console.log("✅ Geolocation result:", { isp, asn, country });
     } catch (err) {
       console.error("❌ IPGeolocation failed:", err.message);
       const geoData = geoip.lookup(ip);
       country = geoData?.country || 'unknown';
+      console.log("📍 Fallback geoip-lite result:", country);
     }
 
     const isScraperISP = fuzzyMatchISP(isp);
@@ -175,8 +198,21 @@ export default async function handler(req, res) {
     const score = riskFactors.filter(Boolean).length / riskFactors.length;
     const isBot = score >= 0.5;
 
-    console.log("📥 Detection Log:", {
-      ip, country, isp, asn, user_agent, score: score.toFixed(2), isBot, riskFactors
+    console.log("📊 Detection Summary:", {
+      ip,
+      country,
+      isp,
+      asn,
+      user_agent,
+      score: score.toFixed(2),
+      isBot,
+      flags: {
+        isBotUserAgent,
+        isScraperISP,
+        isIPAbuser,
+        isSuspiciousTraffic,
+        isDataCenterASN
+      }
     });
 
     return res.status(200).json({
@@ -196,7 +232,7 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
-    console.error("🔥 UNEXPECTED ERROR:", err.message);
+    console.error("🔥 UNEXPECTED ERROR in /api/detect_bot:", err.stack || err.message);
     return res.status(500).json({ error: "Internal server error" });
   }
 }
