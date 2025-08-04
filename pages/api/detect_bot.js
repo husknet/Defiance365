@@ -1,6 +1,5 @@
 import axios from 'axios';
 import geoip from 'geoip-lite';
-import { createHmac } from 'crypto';
 import stringSimilarity from 'string-similarity';
 
 const KNOWN_BOT_ISPS = [
@@ -67,6 +66,7 @@ const TRAFFIC_TIMEFRAME = 30 * 1000;
 const TRAFFIC_DATA = {};
 const ISP_SIMILARITY_THRESHOLD = 0.7;
 // Utilities
+
 function fuzzyMatchISP(isp) {
   if (WHITELISTED_ISPS.includes(isp.toLowerCase())) return false;
   const match = stringSimilarity.findBestMatch(isp.toLowerCase(), KNOWN_BOT_ISPS);
@@ -90,66 +90,23 @@ async function checkIPReputation(ip) {
   }
 }
 
-// Manual JWT verification (HS256)
-function verifyJwt(token) {
-  try {
-    const secret = process.env.JWT_SECRET;
-    const [headerB64, payloadB64, signature] = token.split('.');
-    const data = `${headerB64}.${payloadB64}`;
-
-    const expectedSig = createHmac('sha256', secret)
-      .update(data)
-      .digest('base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
-
-    if (expectedSig !== signature) {
-      console.warn('❌ JWT signature mismatch');
-      return null;
-    }
-
-    const payloadJson = Buffer.from(payloadB64, 'base64').toString('utf8');
-    const payload = JSON.parse(payloadJson);
-
-    const now = Math.floor(Date.now() / 1000);
-    if (payload.exp && payload.exp < now) {
-      console.warn('❌ JWT expired');
-      return null;
-    }
-
-    return payload;
-  } catch (err) {
-    console.error("❌ JWT verification failed:", err.message);
-    return null;
-  }
-}
-
-// Main handler
 export default async function handler(req, res) {
   try {
     res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGINS || '*');
     res.setHeader('Access-Control-Allow-Methods', 'OPTIONS, POST');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
 
     if (req.method === 'OPTIONS') return res.status(200).end();
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-    // JWT Auth
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.warn("❌ Missing Authorization header");
-      return res.status(401).json({ error: 'Unauthorized: Missing or invalid Authorization header.' });
+    // ✅ Static API Key Authentication
+    const apiKey = req.headers['x-api-key'];
+    if (!apiKey || apiKey !== process.env.API_KEY) {
+      console.warn("🔒 Invalid API key");
+      return res.status(401).json({ error: 'Unauthorized: Invalid API key.' });
     }
 
-    const token = authHeader.split(' ')[1];
-    const jwtPayload = verifyJwt(token);
-    if (!jwtPayload) {
-      console.warn("❌ Invalid JWT token");
-      return res.status(401).json({ error: 'Unauthorized: Invalid JWT token.' });
-    }
-
-    // Origin check
+    // ✅ Origin check
     const origin = req.headers.origin || '';
     const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',');
     if (process.env.ALLOWED_ORIGINS !== '*' && !allowedOrigins.includes(origin)) {
@@ -172,7 +129,7 @@ export default async function handler(req, res) {
       const geoRes = await axios.get("https://api.ipgeolocation.io/ipgeo", {
         params: {
           apiKey: process.env.IPGEOLOCATION_API_KEY,
-          ip: ip
+          ip
         },
         timeout: 4000
       });
